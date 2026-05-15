@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Build / deploy artifacts
+dist/
+deploy-o2switch/
+
+# Secrets & env
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+.env.local
+
+# Logs & OS
+*.log
+.DS_Store
+Thumbs.db
+
+# Playwright / tooling
+backend/playwright-profile/
+backend/playwright-profile-*/
+
+# Editor
+.vscode/
+.idea/

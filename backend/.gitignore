@@ -1,0 +1,9 @@
+node_modules/
+live-data.json
+
+# Secrets (ne pas versionner)
+.env
+
+# Profils navigateur Playwright (générés localement)
+playwright-profile/
+playwright-profile-*/

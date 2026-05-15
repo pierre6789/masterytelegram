@@ -347,7 +347,7 @@ export default function LandingPage({ onConnect }: { onConnect: () => void }) {
             <div className="bg-[#13131A] border border-[#1F1F2E] rounded-3xl p-4 md:p-6 shadow-xl shadow-indigo-500/5">
               <div className="aspect-video w-full overflow-hidden rounded-2xl border border-[#1F1F2E] bg-black">
                 <iframe
-                  src="https://www.youtube.com/embed/cP1ikDqfrP0"
+                  src="https://www.youtube.com/embed/rWR_qiaoXMg"
                   title="VSL"
                   className="w-full h-full"
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"

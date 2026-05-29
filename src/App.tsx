@@ -1,5 +1,28 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useStore, Course, Module, Lesson, User, Announcement, Flip, FlipStatus, PrivateSourceItem, PrivateSourceCategory, getPlatformStateSnapshot, applyPlatformStateSnapshot, getSharedStateSnapshot, applySharedStateSnapshot, getUserWorkspaceSnapshot, applyUserWorkspaceSnapshot } from './store';
+import {
+  useStore,
+  Course,
+  Module,
+  Lesson,
+  User,
+  Announcement,
+  Flip,
+  FlipStatus,
+  PrivateSourceItem,
+  PrivateSourceCategory,
+  getPlatformStateSnapshot,
+  applyPlatformStateSnapshot,
+  getSharedStateSnapshot,
+  applySharedStateSnapshot,
+  getUserWorkspaceSnapshot,
+  applyUserWorkspaceSnapshot,
+  AFFILIATE_TIER_RECAP,
+  AFFILIATE_FIRST_SALE_BONUS_EUR,
+  AFFILIATE_PAYOUT_POLICY_LABEL,
+  tierFromValidatedSales,
+  affiliateTierLabel,
+  TBM_PRICE_EUR,
+} from './store';
 import {
   fetchCoreAffiliateActivity,
   fetchCoreAffiliateCodes,
@@ -18,6 +41,8 @@ import {
   ArrowLeft, Menu, XIcon, Shield, Clock, Video, Megaphone, Info, AlertTriangle, GraduationCap, Bell, ListChecks, FolderLock, Link2, Wallet, BarChart3, Database
 } from 'lucide-react';
 import LandingPage from './LandingPage';
+import LegalDocumentPage from './legal/LegalDocumentPage';
+import { getLegalDocumentByPath } from './legal/documents';
 import { FlipDetailChart } from './FlipDetailChart';
 import { PrivateSourceAvatar } from './privateSourceAvatar';
 // ─── PAGES ──────────────────────────────────────────────────────────────
@@ -375,16 +400,24 @@ function LessonViewPage({ courseId, moduleId, lessonId, setNav }: {
   const prev = currentIdx > 0 ? allLessons[currentIdx - 1] : null;
   const next = currentIdx < allLessons.length - 1 ? allLessons[currentIdx + 1] : null;
 
-  const isYouTube = lesson.videoUrl && (lesson.videoUrl.includes('youtube.com') || lesson.videoUrl.includes('youtu.be'));
-  const isLoom = lesson.videoUrl && lesson.videoUrl.includes('loom.com');
-  const getYTEmbed = (url: string) => {
-    const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([^&?\s]+)/);
-    return m ? `https://www.youtube.com/embed/${m[1]}` : url;
+  const safeHostname = (url: string): string | null => {
+    try { return new URL(url).hostname.toLowerCase(); } catch { return null; }
   };
-  const getLoomEmbed = (url: string) => {
+  const ytHosts = new Set(['youtube.com', 'www.youtube.com', 'm.youtube.com', 'youtu.be', 'www.youtu.be']);
+  const loomHosts = new Set(['loom.com', 'www.loom.com']);
+  const host = lesson.videoUrl ? safeHostname(lesson.videoUrl) : null;
+  const isYouTube = host !== null && ytHosts.has(host);
+  const isLoom = host !== null && loomHosts.has(host);
+  const getYTEmbed = (url: string): string | null => {
+    const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([A-Za-z0-9_-]{6,})/);
+    return m ? `https://www.youtube-nocookie.com/embed/${m[1]}` : null;
+  };
+  const getLoomEmbed = (url: string): string | null => {
     const m = url.match(/loom\.com\/(?:share|embed)\/([a-zA-Z0-9]+)/);
-    return m ? `https://www.loom.com/embed/${m[1]}` : url;
+    return m ? `https://www.loom.com/embed/${m[1]}` : null;
   };
+  const ytEmbed = lesson.videoUrl && isYouTube ? getYTEmbed(lesson.videoUrl) : null;
+  const loomEmbed = lesson.videoUrl && isLoom ? getLoomEmbed(lesson.videoUrl) : null;
 
   return (
     <div className="fade-in max-w-4xl">
@@ -395,17 +428,23 @@ function LessonViewPage({ courseId, moduleId, lessonId, setNav }: {
       <h1 className="text-xl font-bold text-foreground mb-1">{lesson.title}</h1>
       <p className="text-muted-foreground text-sm mb-6">{mod.title} • {lesson.duration}</p>
 
-      {lesson.videoUrl && (
-        <div className="aspect-video bg-background rounded-2xl overflow-hidden mb-8 border border-border">
-          {isLoom ? (
-            <iframe src={getLoomEmbed(lesson.videoUrl)} className="w-full h-full" allowFullScreen allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" style={{ border: 'none' }} />
-          ) : isYouTube ? (
-            <iframe src={getYTEmbed(lesson.videoUrl)} className="w-full h-full" allowFullScreen allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" />
-          ) : (
-            <video src={lesson.videoUrl} controls className="w-full h-full" />
-          )}
-        </div>
-      )}
+      {lesson.videoUrl && (() => {
+        /** URL directe .mp4/.webm uniquement en https : pas d'iframe arbitraire (XSS via attribut src). */
+        const isHttpsMedia = host !== null && lesson.videoUrl.startsWith('https://') && /\.(mp4|webm|ogg|m3u8)(\?|$)/i.test(lesson.videoUrl);
+        return (
+          <div className="aspect-video bg-background rounded-2xl overflow-hidden mb-8 border border-border">
+            {loomEmbed ? (
+              <iframe src={loomEmbed} className="w-full h-full" allowFullScreen referrerPolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-presentation allow-popups" allow="autoplay; encrypted-media; picture-in-picture" style={{ border: 'none' }} />
+            ) : ytEmbed ? (
+              <iframe src={ytEmbed} className="w-full h-full" allowFullScreen referrerPolicy="no-referrer" sandbox="allow-scripts allow-same-origin allow-presentation allow-popups" allow="autoplay; encrypted-media; picture-in-picture" />
+            ) : isHttpsMedia ? (
+              <video src={lesson.videoUrl} controls className="w-full h-full" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center text-sm text-muted-foreground">Vidéo non disponible (format non supporté).</div>
+            )}
+          </div>
+        );
+      })()}
 
       {lesson.content && (
         <div className="bg-secondary rounded-2xl border border-border p-6 mb-8">
@@ -1856,7 +1895,8 @@ function AffiliateDashboardPage() {
   const available = Math.max(0, totalValidatedCommission - totalPaid);
 
   const validatedCount = validatedSales.length;
-  const tier = validatedCount >= 50 ? 'Diamant' : validatedCount >= 15 ? 'Or' : validatedCount >= 5 ? 'Argent' : 'Bronze';
+  const currentTierKey = tierFromValidatedSales(validatedCount);
+  const tier = affiliateTierLabel(currentTierKey);
   const nextThreshold = validatedCount < 5 ? 5 : validatedCount < 15 ? 15 : validatedCount < 50 ? 50 : null;
   const nextLabel = validatedCount < 5 ? 'Argent' : validatedCount < 15 ? 'Or' : validatedCount < 50 ? 'Diamant' : null;
 
@@ -1975,6 +2015,54 @@ function AffiliateDashboardPage() {
         </div>
       </div>
 
+      <div className="bg-secondary rounded-xl border border-border p-5 mb-6">
+        <p className="text-foreground font-semibold mb-1">Récapitulatif du programme</p>
+        <p className="text-xs text-muted-foreground mb-4">
+          Commission calculée sur le montant de chaque vente. Ton palier actuel dépend du nombre de ventes validées.
+        </p>
+        <div className="overflow-auto">
+          <table className="w-full text-sm">
+            <thead className="text-xs text-muted-foreground border-b border-border">
+              <tr>
+                <th className="text-left py-2 pr-3">Palier</th>
+                <th className="text-left py-2 pr-3">Ventes validées</th>
+                <th className="text-right py-2">Commission</th>
+              </tr>
+            </thead>
+            <tbody>
+              {AFFILIATE_TIER_RECAP.map((row) => {
+                const isCurrent = row.tier === currentTierKey;
+                return (
+                  <tr
+                    key={row.tier}
+                    className={`border-b border-border/60 last:border-b-0 ${isCurrent ? 'bg-primary/10' : ''}`}
+                  >
+                    <td className="py-2.5 pr-3 text-foreground">
+                      <span className="inline-flex items-center gap-2">
+                        {row.label}
+                        {isCurrent && (
+                          <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-primary/20 text-primary font-medium">
+                            Actuel
+                          </span>
+                        )}
+                      </span>
+                    </td>
+                    <td className="py-2.5 pr-3 text-muted-foreground">{row.validatedSalesLabel}</td>
+                    <td className="py-2.5 text-right font-semibold text-foreground">{row.commissionPercent} %</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <ul className="mt-4 space-y-1.5 text-xs text-muted-foreground list-disc list-inside">
+          <li>
+            Bonus première vente : <span className="text-foreground font-medium">+{AFFILIATE_FIRST_SALE_BONUS_EUR} €</span> en plus du pourcentage (une seule fois).
+          </li>
+          <li>{AFFILIATE_PAYOUT_POLICY_LABEL}</li>
+        </ul>
+      </div>
+
       <div className="grid gap-4 lg:grid-cols-2">
         <div className="bg-secondary rounded-xl border border-border p-5">
           <p className="text-foreground font-semibold mb-3">Ventes</p>
@@ -2025,13 +2113,9 @@ function AffiliateDashboardPage() {
               ))}
             </div>
           )}
-          <p className="text-xs text-muted-foreground mt-4">Paiement auto: tous les 7 jours si seuil atteint (50€).</p>
+          <p className="text-xs text-muted-foreground mt-4">{AFFILIATE_PAYOUT_POLICY_LABEL}</p>
         </div>
       </div>
-
-      <p className="text-xs text-muted-foreground mt-6">
-        Note: cette version est “front-only” (stockage local). Pour un vrai programme sécurisé multi-utilisateurs, il faudra un backend.
-      </p>
     </div>
   );
 }
@@ -2139,9 +2223,9 @@ function AdminAffiliatesPage() {
                       <td className="py-2 text-right text-foreground">{validated}</td>
                       <td className="py-2 text-right">
                         <button
-                          onClick={() => void recordAffiliateSale(u.id, 149)}
+                          onClick={() => void recordAffiliateSale(u.id, TBM_PRICE_EUR)}
                           className="px-3 py-1.5 rounded-lg bg-primary text-foreground text-xs cursor-pointer hover:bg-primary-dark transition-colors"
-                          title="Crée une vente en attente (149€)"
+                          title={`Crée une vente en attente (${TBM_PRICE_EUR}€)`}
                         >
                           Simuler vente
                         </button>
@@ -2306,6 +2390,8 @@ function AnnouncementTopNotification({
 
 export default function App() {
   const { currentUser, announcements, hydrateCore, courses, completedLessons, flips, privateSources } = useStore();
+  const announcementsForSync = useStore((s) => s.announcements);
+  const [publicPath, setPublicPath] = useState(() => window.location.pathname);
   const [nav, setNav] = useState<NavState>({ page: 'dashboard' });
   const [mobileOpen, setMobileOpen] = useState(false);
   const [lastSeenAnnouncementsAt, setLastSeenAnnouncementsAt] = useState<string>(() => localStorage.getItem('tbm-announcements-last-seen-at') || '');
@@ -2388,6 +2474,25 @@ export default function App() {
     userWorkspaceSyncReadyRef.current = true;
   }, [currentUser?.id]);
 
+  /** Annonces admin → shared-state Supabase (évite perte au reload). */
+  useEffect(() => {
+    if (!CORE_SUPABASE_ENABLED) return;
+    if (!currentUser || currentUser.role !== 'admin') return;
+    const t = window.setTimeout(() => {
+      const payload = getSharedStateSnapshot();
+      const serialized = JSON.stringify(payload);
+      if (serialized === lastSharedSyncRef.current) return;
+      void pushCoreSharedState(payload)
+        .then(() => {
+          lastSharedSyncRef.current = serialized;
+        })
+        .catch(() => {
+          // Retry au prochain changement ou intervalle.
+        });
+    }, 500);
+    return () => window.clearTimeout(t);
+  }, [currentUser?.id, announcementsForSync]);
+
   /** Sauvegarde serveur peu après chaque changement (sans localStorage en mode Supabase). */
   useEffect(() => {
     if (!CORE_SUPABASE_ENABLED) return;
@@ -2422,8 +2527,25 @@ export default function App() {
         })
         .catch(() => {});
     };
-    document.addEventListener('visibilitychange', flushWorkspace);
-    return () => document.removeEventListener('visibilitychange', flushWorkspace);
+    const flushShared = () => {
+      if (document.visibilityState !== 'hidden') return;
+      const u = useStore.getState().currentUser;
+      if (!u || u.role !== 'admin') return;
+      const payload = getSharedStateSnapshot();
+      const serialized = JSON.stringify(payload);
+      if (serialized === lastSharedSyncRef.current) return;
+      void pushCoreSharedState(payload)
+        .then(() => {
+          lastSharedSyncRef.current = serialized;
+        })
+        .catch(() => {});
+    };
+    const onVisibility = () => {
+      flushWorkspace();
+      flushShared();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
   }, []);
 
   useEffect(() => {
@@ -2708,8 +2830,33 @@ export default function App() {
     }
   }, [currentUser]);
 
+  useEffect(() => {
+    const onPopState = () => setPublicPath(window.location.pathname);
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const navigatePublic = (path: string) => {
+    window.history.pushState({}, '', path);
+    setPublicPath(path);
+    window.scrollTo(0, 0);
+  };
+
+  const legalDocument = !currentUser ? getLegalDocumentByPath(publicPath) : null;
+
   if (!currentUser) {
-    return showLogin ? <LoginPage onBackToHome={() => setShowLogin(false)} /> : <LandingPage onConnect={() => setShowLogin(true)} />;
+    if (legalDocument) {
+      return (
+        <LegalDocumentPage
+          document={legalDocument}
+          onBackHome={() => navigatePublic('/')}
+          onNavigate={navigatePublic}
+        />
+      );
+    }
+    return showLogin
+      ? <LoginPage onBackToHome={() => setShowLogin(false)} />
+      : <LandingPage onConnect={() => setShowLogin(true)} onNavigate={navigatePublic} />;
   }
 
   const renderPage = () => {

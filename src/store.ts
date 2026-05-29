@@ -202,25 +202,48 @@ const safeCode = () => {
     .slice(0, 24);
 };
 
-const TBM_PRICE_EUR = 149;
+export const TBM_PRICE_EUR = 699;
 const CORE_DB_MODE = (import.meta.env.VITE_CORE_DB_MODE as string | undefined) ?? 'local';
 const CORE_SUPABASE_ENABLED = CORE_DB_MODE === 'supabase';
 
-const tierFromValidatedSales = (validatedSalesCount: number): AffiliateTier => {
+export const AFFILIATE_FIRST_SALE_BONUS_EUR = 20;
+export const AFFILIATE_PAYOUT_MIN_EUR = 100;
+export const AFFILIATE_PAYOUT_INTERVAL_DAYS_MIN = 15;
+export const AFFILIATE_PAYOUT_INTERVAL_DAYS_MAX = 20;
+export const AFFILIATE_PAYOUT_POLICY_LABEL =
+  'Paiement automatique tous les 15 à 20 jours si tu atteins 100 € de commissions validées disponibles.';
+
+export const AFFILIATE_TIER_RECAP: {
+  tier: AffiliateTier;
+  label: string;
+  validatedSalesLabel: string;
+  commissionPercent: number;
+}[] = [
+  { tier: 'bronze', label: 'Bronze', validatedSalesLabel: '0 – 4 ventes validées', commissionPercent: 30 },
+  { tier: 'silver', label: 'Argent', validatedSalesLabel: '5 – 14 ventes validées', commissionPercent: 40 },
+  { tier: 'gold', label: 'Or', validatedSalesLabel: '15 – 49 ventes validées', commissionPercent: 50 },
+  { tier: 'diamond', label: 'Diamant', validatedSalesLabel: '50+ ventes validées', commissionPercent: 60 },
+];
+
+export function tierFromValidatedSales(validatedSalesCount: number): AffiliateTier {
   if (validatedSalesCount >= 50) return 'diamond';
   if (validatedSalesCount >= 15) return 'gold';
   if (validatedSalesCount >= 5) return 'silver';
   return 'bronze';
-};
+}
 
-const commissionRateForTier = (tier: AffiliateTier): number => {
+export function commissionRateForTier(tier: AffiliateTier): number {
   switch (tier) {
     case 'bronze': return 0.30;
     case 'silver': return 0.40;
     case 'gold': return 0.50;
     case 'diamond': return 0.60;
   }
-};
+}
+
+export function affiliateTierLabel(tier: AffiliateTier): string {
+  return AFFILIATE_TIER_RECAP.find((r) => r.tier === tier)?.label ?? tier;
+}
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
@@ -331,24 +354,7 @@ const defaultPrivateSources: PrivateSourceItem[] = [
   { id: 'imp-res-15', category: 'telegram', title: 'TON Community Channel', description: 'Canal officiel de la communauté TON', url: 'https://t.me/toncommunitychannel', imageUrl: '/logos/ton-community.png', meta: 'Ressources • Communauté', order: 2015, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
 ];
 
-const defaultUsers: User[] = [
-  {
-    id: 'admin-1',
-    email: 'admin@tbm.fr',
-    password: 'admin123',
-    name: 'Admin TBM',
-    role: 'admin',
-    createdAt: new Date().toISOString(),
-  },
-  {
-    id: 'user-1',
-    email: 'demo@tbm.fr',
-    password: 'demo123',
-    name: 'Utilisateur Demo',
-    role: 'user',
-    createdAt: new Date().toISOString(),
-  },
-];
+const defaultUsers: User[] = [];
 
 const defaultCourses: Course[] = [
   {
@@ -910,10 +916,9 @@ export const useStore = create<Store>()(
       },
 
       processAffiliatePayouts: () => set(s => {
-        // Auto payout every 7 days if >= 50€ validated and not yet paid.
         const now = Date.now();
-        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-        const minThreshold = 50;
+        const intervalMs = AFFILIATE_PAYOUT_INTERVAL_DAYS_MIN * 24 * 60 * 60 * 1000;
+        const minThreshold = AFFILIATE_PAYOUT_MIN_EUR;
 
         const payouts = [...s.affiliatePayouts];
 
@@ -947,7 +952,7 @@ export const useStore = create<Store>()(
           if (pending < minThreshold) continue;
 
           const lastTs = lastPayoutByAffiliate.get(affiliateUserId) ?? 0;
-          if (lastTs && now - lastTs < sevenDaysMs) continue;
+          if (lastTs && now - lastTs < intervalMs) continue;
 
           payouts.unshift({
             id: uid(),
@@ -1034,6 +1039,7 @@ export const useStore = create<Store>()(
         if (CORE_SUPABASE_ENABLED) {
           delete cleaned.flips;
           delete cleaned.privateSources;
+          delete cleaned.announcements;
         }
         return withLatestSeedData(cleaned as Partial<Store>);
       },
@@ -1048,13 +1054,14 @@ export const useStore = create<Store>()(
         if (CORE_SUPABASE_ENABLED) {
           delete p.flips;
           delete p.privateSources;
+          delete p.announcements;
         }
         const merged = { ...currentState, ...p };
         return withLatestSeedData(merged) as Store;
       },
       partialize: (state) => {
         if (!CORE_SUPABASE_ENABLED) return state;
-        const { flips: _flips, privateSources: _ps, ...rest } = state;
+        const { flips: _flips, privateSources: _ps, announcements: _ann, ...rest } = state;
         return rest;
       },
     }

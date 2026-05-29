@@ -1,12 +1,19 @@
 const path = require('path');
 const Fastify = require('fastify');
 const cors = require('@fastify/cors');
+const helmet = require('@fastify/helmet');
+const rateLimit = require('@fastify/rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const Stripe = require('stripe');
 require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
+console.log('[api] boot', { node: process.version, port: process.env.PORT, host: process.env.BACKEND_HOST });
+
 const PORT = Number(process.env.PORT || process.env.BACKEND_PORT || 8787);
-const HOST = process.env.BACKEND_HOST || '127.0.0.1';
+/** Railway injecte PORT : toujours 0.0.0.0 (BACKEND_HOST=127.0.0.1 casse le healthcheck). */
+const HOST = process.env.PORT
+  ? '0.0.0.0'
+  : (process.env.BACKEND_HOST || '127.0.0.1');
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const SUPABASE_PLATFORM_TABLE = process.env.SUPABASE_PLATFORM_TABLE || 'platform_state';
@@ -22,11 +29,26 @@ const STRIPE_CANCEL_URL = process.env.STRIPE_CANCEL_URL || '';
 const PUBLIC_SITE_ORIGIN = String(process.env.PUBLIC_SITE_ORIGIN || process.env.FRONTEND_URL || '').replace(/\/$/, '');
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 
+let supabase = null;
 const supabaseEnabled = Boolean(SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY);
-const supabase = supabaseEnabled
-  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } })
-  : null;
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
+if (supabaseEnabled) {
+  try {
+    supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { persistSession: false, autoRefreshToken: false },
+    });
+  } catch (e) {
+    console.error('[api] Supabase init failed:', e?.message || e);
+  }
+}
+
+let stripe = null;
+if (STRIPE_SECRET_KEY) {
+  try {
+    stripe = new Stripe(STRIPE_SECRET_KEY);
+  } catch (e) {
+    console.error('[api] Stripe init failed:', e?.message || e);
+  }
+}
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -206,10 +228,8 @@ async function ensureProfileForAuthUser(authUser) {
     .maybeSingle();
   if (existing) return existing;
 
-  const { count } = await supabase
-    .from('profiles')
-    .select('*', { head: true, count: 'exact' });
-  const role = (count || 0) === 0 ? 'admin' : 'user';
+  /** Nouveaux profils toujours en role=user. L'admin est promu manuellement (update profiles set role='admin' where email=…). */
+  const role = 'user';
   const row = {
     id: authUser.id,
     email,
@@ -484,7 +504,21 @@ async function writeCoreSnapshot(input) {
   }
 }
 
-const app = Fastify({ logger: false });
+const healthPayload = () => ({
+  ok: true,
+  service: 'masterytelegram-api',
+  checkoutRoute: true,
+  stripeConfigured: Boolean(stripe),
+  supabaseConfigured: Boolean(supabase),
+  coreDbMode: CORE_DB_MODE,
+  affiliateWebhook: Boolean(STRIPE_WEBHOOK_SECRET),
+});
+
+const app = Fastify({ logger: Boolean(process.env.PORT) });
+/** Sondes enregistrées en premier (avant plugins). */
+app.get('/', async () => healthPayload());
+app.get('/api/health', async () => healthPayload());
+
 try {
   app.removeContentTypeParser('application/json');
 } catch (_) {
@@ -503,40 +537,26 @@ app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (req, body, 
     done(err, undefined);
   }
 });
-app.register(cors, {
-  origin: true,
-  methods: ['GET', 'HEAD', 'PUT', 'POST', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'X-Admin-Token', 'stripe-signature'],
-});
 
-/** Vérif rapide après déploiement : doit répondre 200 avec checkoutRoute: true sur la bonne version. */
-app.get('/api/health', async () => ({
-  ok: true,
-  service: 'masterytelegram-api',
-  checkoutRoute: true,
-  stripeConfigured: Boolean(stripe),
-  coreDbMode: CORE_DB_MODE,
-  affiliateWebhook: Boolean(STRIPE_WEBHOOK_SECRET),
-}));
-
-/** Enregistre un clic d’affiliation (public, sans auth). */
-app.post('/api/public/affiliate-click', async (req, reply) => {
+/** Enregistre un clic d’affiliation (public, sans auth). Réponse 200 systématique pour empêcher l’énumération de codes valides. */
+app.post('/api/public/affiliate-click', {
+  config: { rateLimit: { max: 10, timeWindow: '1 minute' } },
+}, async (req, reply) => {
   if (!supabase || CORE_DB_MODE !== 'supabase') {
-    return reply.code(503).send({ ok: false, error: 'affiliation indisponible' });
+    /** On garde 200 ok côté client pour ne rien révéler de l’état serveur à un attaquant. */
+    return { ok: true };
   }
   const code = normalizeAffiliateCode(req.body?.code ?? req.query?.code ?? '');
   if (!isValidAffiliateCode(code)) {
-    return reply.code(400).send({ ok: false, error: 'code invalide' });
+    return { ok: true };
   }
   const ownerId = await resolveAffiliateUserIdFromCode(code);
-  if (!ownerId) return reply.code(404).send({ ok: false, error: 'code inconnu' });
-  const { data, error } = await supabase
+  if (!ownerId) return { ok: true };
+  const { error } = await supabase
     .from('affiliate_clicks')
-    .insert({ affiliate_code: code })
-    .select('id,affiliate_code,created_at')
-    .single();
-  if (error) return reply.code(500).send({ ok: false, error: error.message });
-  return { ok: true, click: mapClickRow(data) };
+    .insert({ affiliate_code: code });
+  if (error) req.log?.warn?.({ err: error.message }, 'affiliate_click_insert_failed');
+  return { ok: true };
 });
 
 /** Stripe : crée une vente affiliée après paiement (checkout.session.completed). */
@@ -799,6 +819,14 @@ app.get('/api/core/bootstrap', async (req, reply) => {
       listAffiliateClicksForBootstrap(profile.id, role),
       listAffiliateSalesForBootstrap(profile.id, role),
     ]);
+    const isAdmin = role === 'admin';
+    /** Filtre: un user normal ne voit que son profil + son code affilié. L'admin voit tout. */
+    const filteredUsers = isAdmin
+      ? core.users
+      : core.users.filter((u) => u.id === profile.id);
+    const filteredAffiliateProfiles = isAdmin
+      ? await listAffiliateProfiles()
+      : (await listAffiliateProfiles()).filter((p) => p.userId === profile.id);
     return {
       ok: true,
       currentUser: {
@@ -809,9 +837,9 @@ app.get('/api/core/bootstrap', async (req, reply) => {
         role,
         createdAt: profile.created_at || nowIso(),
       },
-      users: core.users,
+      users: filteredUsers,
       courses: core.courses,
-      affiliateProfiles: await listAffiliateProfiles(),
+      affiliateProfiles: filteredAffiliateProfiles,
       affiliateClicks,
       affiliateSales,
       completedLessons: (progressRows || []).map((row) => ({
@@ -1053,7 +1081,13 @@ app.put('/api/core/affiliate-code', async (req, reply) => {
     }, { onConflict: 'user_id' });
     if (upsert.error) return reply.code(500).send({ ok: false, error: upsert.error.message });
 
-    return { ok: true, affiliateProfiles: await listAffiliateProfiles() };
+    /** Un user normal ne reçoit que son profil. Admin reçoit la liste complète. */
+    const isAdmin = normalizeCoreRole(actor?.role) === 'admin';
+    const profiles = await listAffiliateProfiles();
+    const affiliateProfiles = isAdmin
+      ? profiles
+      : profiles.filter((p) => p.userId === authUser.id);
+    return { ok: true, affiliateProfiles };
   } catch (e) {
     return reply.code(500).send({ ok: false, error: String(e?.message || e) });
   }
@@ -1111,12 +1145,55 @@ app.put('/api/core/snapshot', { bodyLimit: 12 * 1024 * 1024 }, async (req, reply
   }
 });
 
+const ALLOWED_ORIGINS = new Set([
+  'https://www.masterytelegram.com',
+  'https://masterytelegram.com',
+  'https://www.masterytelegram.fr',
+  'https://masterytelegram.fr',
+  'http://localhost:5173',
+  'http://127.0.0.1:5173',
+]);
+
 async function start() {
+  if (!Number.isFinite(PORT) || PORT < 1 || PORT > 65535) {
+    throw new Error(`Invalid PORT: ${process.env.PORT ?? PORT}`);
+  }
+  await app.register(helmet, {
+    /** L'API ne sert pas de HTML : pas besoin de CSP côté API. La CSP applicative est posée par Vercel sur le front. */
+    contentSecurityPolicy: false,
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  });
+  await app.register(rateLimit, {
+    global: true,
+    max: 120,
+    timeWindow: '1 minute',
+    /** Webhook Stripe : signature interne, jamais rate-limit (Stripe retry agressif). */
+    skip: (req) => req.url.startsWith('/api/stripe/webhook'),
+  });
+  await app.register(cors, {
+    origin: (origin, cb) => {
+      /** Pas d'Origin = requête same-origin / serveur → autorisé. */
+      if (!origin) return cb(null, true);
+      if (ALLOWED_ORIGINS.has(origin)) return cb(null, true);
+      return cb(new Error('origin not allowed'), false);
+    },
+    methods: ['GET', 'HEAD', 'PUT', 'POST', 'DELETE', 'PATCH', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-admin-token', 'X-Admin-Token', 'stripe-signature'],
+  });
+  await app.ready();
   const address = await app.listen({ port: PORT, host: HOST });
-  console.log(`[api] HTTP ${address}`);
+  console.log(`[api] listening ${address} (host=${HOST} port=${PORT} core=${CORE_DB_MODE})`);
 }
 
+process.on('unhandledRejection', (err) => {
+  console.error('[api] unhandledRejection', err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[api] uncaughtException', err);
+  process.exit(1);
+});
+
 start().catch((err) => {
-  console.error(err);
+  console.error('[api] startup failed:', err);
   process.exit(1);
 });
